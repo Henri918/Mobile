@@ -1,0 +1,12 @@
+{
+  "expo": {
+    "name": "Almoxarifado",
+    "slug": "almoxarifado",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "splash": {"resizeMode":"contain","backgroundColor":"#f5f7fb"},
+    "ios": {"supportsTablet": true},
+    "android": {"package":"com.senai.almoxarifado"}
+  }
+}
