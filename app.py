@@ -1,1036 +1,626 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import mysql.connector
-import bcrypt
-import os
-import secrets
+import mysql.connector, bcrypt, os, secrets
 from functools import wraps
+from contextlib import contextmanager
 
 app = Flask(__name__)
 CORS(app)
 
-
-DB_HOST = os.getenv("DB_HOST", "mysql")
-DB_PORT = int(os.getenv("DB_PORT", "3306"))
-DB_USER = os.getenv("DB_USER", "root")
-DB_PASSWORD = os.getenv("DB_PASSWORD", "root")
-DB_NAME = os.getenv("DB_NAME", "login")
+DB = {
+    "host": os.getenv("DB_HOST", "mysql"),
+    "port": int(os.getenv("DB_PORT", "3306")),
+    "user": os.getenv("DB_USER", "root"),
+    "password": os.getenv("DB_PASSWORD", "root"),
+    "database": os.getenv("DB_NAME", "login")
+}
 
 tokens = {}
 
-def conectar():
-    return mysql.connector.connect(
-        host=DB_HOST,
-        port=DB_PORT,
-        user=DB_USER,
-        password=DB_PASSWORD,
-        database=DB_NAME
-    )
+@contextmanager
+def db():
+    con = mysql.connector.connect(**DB)
+    cur = con.cursor(dictionary=True)
+    try:
+        yield con, cur
+    except:
+        con.rollback()
+        raise
+    finally:
+        cur.close()
+        con.close()
+
+
+def resp(msg="", ok=False, code=200, **data):
+    return jsonify({"success": ok, "message": msg, **data}), code
 
 
 def usuario_token():
-    """Retorna o usuário referente ao Bearer Token."""
-
     auth = request.headers.get("Authorization", "")
-
-    if not auth.startswith("Bearer "):
-        return None
-
-    token = auth.replace("Bearer ", "", 1).strip()
-
-    if not token:
-        return None
-
-    return tokens.get(token)
+    return tokens.get(auth[7:].strip()) if auth.startswith("Bearer ") else None
 
 
-def login_required(func):
-    @wraps(func)
-    def wrapper(*args, **kwargs):
+def auth(admin=False):
+    def deco(f):
+        @wraps(f)
+        def wrapper(*args, **kwargs):
+            user = usuario_token()
 
-        usuario = usuario_token()
+            if not user:
+                return resp("Não autenticado", code=401)
 
-        if not usuario:
-            return jsonify({
-                "success": False,
-                "message": "Não autenticado"
-            }), 401
+            if admin and user["tipo"] != "admin":
+                return resp(
+                    "Acesso permitido somente para administradores",
+                    code=403
+                )
 
-        request.usuario = usuario
+            request.usuario = user
+            return f(*args, **kwargs)
 
-        return func(*args, **kwargs)
+        return wrapper
+    return deco
 
-    return wrapper
+
+login_required = auth()
+admin_required = auth(True)
 
 
-def admin_required(func):
-    @wraps(func)
-    def wrapper(*args, **kwargs):
+def produto_dados():
+    d = request.get_json(silent=True) or {}
 
-        usuario = usuario_token()
+    nome = str(d.get("nome", "")).strip()
+    categoria = str(d.get("categoria", "")).strip()
 
-        if not usuario:
-            return jsonify({
-                "success": False,
-                "message": "Não autenticado"
-            }), 401
+    try:
+        quantidade = int(d.get("quantidade", 0))
+        estoque_minimo = int(d.get("estoque_minimo", 0))
+        preco = float(d.get("preco", 0))
+    except (ValueError, TypeError):
+        return None, resp("Valores inválidos", code=400)
 
-        if usuario["tipo"] != "admin":
-            return jsonify({
-                "success": False,
-                "message": "Acesso permitido somente para administradores"
-            }), 403
+    if not nome or not categoria:
+        return None, resp(
+            "Nome e categoria são obrigatórios",
+            code=400
+        )
 
-        request.usuario = usuario
-
-        return func(*args, **kwargs)
-
-    return wrapper
-
+    return {
+        "nome": nome,
+        "categoria": categoria,
+        "quantidade": quantidade,
+        "estoque_minimo": estoque_minimo,
+        "preco": preco,
+        "foto": d.get("foto")
+    }, None
 
 @app.get("/")
 def inicio():
-    return jsonify({
-        "success": True,
-        "message": "API do Almoxarifado funcionando"
-    })
+    return resp(
+        "API do Almoxarifado funcionando",
+        True
+    )
 
 
 @app.get("/api/health")
 def health():
-
-    banco = None
-
     try:
-        banco = conectar()
-
-        return jsonify({
-            "success": True,
-            "message": "Flask e MySQL funcionando"
-        })
-
-    except Exception as erro:
-
-        print("ERRO HEALTH:", erro)
-
-        return jsonify({
-            "success": False,
-            "message": "MySQL indisponível"
-        }), 500
-
-    finally:
-
-        if banco and banco.is_connected():
-            banco.close()
-
+        with db():
+            return resp(
+                "Flask e MySQL funcionando",
+                True
+            )
+    except Exception as e:
+        print("ERRO HEALTH:", e)
+        return resp("MySQL indisponível", code=500)
 
 @app.post("/api/login")
 @app.post("/api/auth/login")
 def login():
+    d = request.get_json(silent=True) or {}
 
-    dados = request.get_json(silent=True) or {}
-
-    email = str(dados.get("email", "")).strip().lower()
-    senha = str(dados.get("senha", ""))
+    email = str(d.get("email", "")).strip().lower()
+    senha = str(d.get("senha", ""))
 
     if not email or not senha:
-        return jsonify({
-            "success": False,
-            "message": "Preencha e-mail e senha"
-        }), 400
-
-    banco = None
-    cursor = None
+        return resp("Preencha e-mail e senha", code=400)
 
     try:
-
-        banco = conectar()
-        cursor = banco.cursor(dictionary=True)
-
-        cursor.execute(
-            """
-            SELECT id, email, senha, tipo
-            FROM usuario
-            WHERE email = %s
-            """,
-            (email,)
-        )
-
-        usuario = cursor.fetchone()
-
-        if not usuario:
-            return jsonify({
-                "success": False,
-                "message": "E-mail ou senha incorretos"
-            }), 401
-
-        try:
-            senha_correta = bcrypt.checkpw(
-                senha.encode("utf-8"),
-                usuario["senha"].encode("utf-8")
+        with db() as (_, cur):
+            cur.execute(
+                "SELECT id,email,senha,tipo FROM usuario WHERE email=%s",
+                (email,)
             )
-        except Exception:
-            senha_correta = False
 
-        if not senha_correta:
-            return jsonify({
-                "success": False,
-                "message": "E-mail ou senha incorretos"
-            }), 401
+            user = cur.fetchone()
 
-        # Cria token
-        token = secrets.token_urlsafe(32)
+            if not user:
+                return resp(
+                    "E-mail ou senha incorretos",
+                    code=401
+                )
 
-        usuario_publico = {
-            "id": usuario["id"],
-            "email": usuario["email"],
-            "tipo": usuario["tipo"]
-        }
+            try:
+                valido = bcrypt.checkpw(
+                    senha.encode(),
+                    user["senha"].encode()
+                )
+            except:
+                valido = False
 
-        tokens[token] = usuario_publico
+            if not valido:
+                return resp(
+                    "E-mail ou senha incorretos",
+                    code=401
+                )
 
-        return jsonify({
-        "success": True,
-        "message": "Login realizado com sucesso",
-        "data": {
-            "token": token,
-            "user": usuario_publico
-        }
-        }), 200
+            publico = {
+                "id": user["id"],
+                "email": user["email"],
+                "tipo": user["tipo"]
+            }
 
-    except Exception as erro:
+            token = secrets.token_urlsafe(32)
+            tokens[token] = publico
 
-        print("ERRO LOGIN:", erro)
+            return resp(
+                "Login realizado com sucesso",
+                True,
+                data={
+                    "token": token,
+                    "user": publico
+                }
+            )
 
-        return jsonify({
-            "success": False,
-            "message": "Erro ao realizar login"
-        }), 500
-
-    finally:
-
-        if cursor:
-            cursor.close()
-
-        if banco and banco.is_connected():
-            banco.close()
+    except Exception as e:
+        print("ERRO LOGIN:", e)
+        return resp("Erro ao realizar login", code=500)
 
 
 @app.post("/api/auth/logout")
 @login_required
 def logout():
+    token = request.headers.get("Authorization", "")[7:].strip()
+    tokens.pop(token, None)
 
-    auth = request.headers.get("Authorization", "")
-    token = auth.replace("Bearer ", "", 1).strip()
+    return resp("Logout realizado", True)
 
-    if token in tokens:
-        del tokens[token]
-
-    return jsonify({
-        "success": True,
-        "message": "Logout realizado"
-    })
-
-
-# =========================================================
-# USUÁRIO LOGADO
-# =========================================================
 
 @app.get("/api/auth/me")
 @login_required
 def me():
-
     return jsonify({
         "success": True,
         "user": request.usuario
     })
 
-
-
 @app.post("/api/register")
 @app.post("/api/auth/register")
 def register():
+    d = request.get_json(silent=True) or {}
 
-    dados = request.get_json(silent=True) or {}
-
-    email = str(dados.get("email", "")).strip().lower()
-    senha = str(dados.get("senha", ""))
+    email = str(d.get("email", "")).strip().lower()
+    senha = str(d.get("senha", ""))
 
     if not email or not senha:
-        return jsonify({
-            "success": False,
-            "message": "Preencha e-mail e senha"
-        }), 400
+        return resp("Preencha e-mail e senha", code=400)
 
     if len(senha) < 6:
-        return jsonify({
-            "success": False,
-            "message": "A senha deve ter pelo menos 6 caracteres"
-        }), 400
-
-    banco = None
-    cursor = None
+        return resp(
+            "A senha deve ter pelo menos 6 caracteres",
+            code=400
+        )
 
     try:
+        with db() as (con, cur):
+            cur.execute(
+                "SELECT id FROM usuario WHERE email=%s",
+                (email,)
+            )
 
-        banco = conectar()
-        cursor = banco.cursor(dictionary=True)
+            if cur.fetchone():
+                return resp(
+                    "Este e-mail já está cadastrado",
+                    code=409
+                )
 
-        cursor.execute(
-            "SELECT id FROM usuario WHERE email = %s",
-            (email,)
-        )
+            senha = bcrypt.hashpw(
+                senha.encode(),
+                bcrypt.gensalt()
+            ).decode()
 
-        if cursor.fetchone():
-            return jsonify({
-                "success": False,
-                "message": "Este e-mail já está cadastrado"
-            }), 409
+            cur.execute(
+                """
+                INSERT INTO usuario(email,senha,tipo)
+                VALUES(%s,%s,%s)
+                """,
+                (email, senha, "usuario")
+            )
 
-        senha_hash = bcrypt.hashpw(
-            senha.encode("utf-8"),
-            bcrypt.gensalt()
-        ).decode("utf-8")
+            con.commit()
 
-        cursor.execute(
-            """
-            INSERT INTO usuario (email, senha, tipo)
-            VALUES (%s, %s, %s)
-            """,
-            (email, senha_hash, "usuario")
-        )
+            return resp(
+                "Conta criada com sucesso",
+                True,
+                201,
+                user={
+                    "id": cur.lastrowid,
+                    "email": email,
+                    "tipo": "usuario"
+                }
+            )
 
-        banco.commit()
+    except Exception as e:
+        print("ERRO REGISTER:", e)
+        return resp("Erro ao criar conta", code=500)
 
-        novo_usuario = {
-            "id": cursor.lastrowid,
-            "email": email,
-            "tipo": "usuario"
-        }
-
-        return jsonify({
-            "success": True,
-            "message": "Conta criada com sucesso",
-            "user": novo_usuario
-        }), 201
-
-    except Exception as erro:
-
-        if banco:
-            banco.rollback()
-
-        print("ERRO REGISTER:", erro)
-
-        return jsonify({
-            "success": False,
-            "message": "Erro ao criar conta"
-        }), 500
-
-    finally:
-
-        if cursor:
-            cursor.close()
-
-        if banco and banco.is_connected():
-            banco.close()
+CAMPOS = """
+id,nome,categoria,quantidade,estoque_minimo,preco,foto
+"""
 
 
 @app.get("/api/produtos")
 @login_required
 def listar_produtos():
-
-    banco = None
-    cursor = None
-
     try:
+        with db() as (_, cur):
+            cur.execute(
+                f"""
+                SELECT {CAMPOS}
+                FROM produtos
+                ORDER BY id DESC
+                """
+            )
 
-        banco = conectar()
-        cursor = banco.cursor(dictionary=True)
-
-        cursor.execute(
-            """
-            SELECT
-                id,
-                nome,
-                categoria,
-                quantidade,
-                estoque_minimo,
-                preco,
-                foto
-            FROM produtos
-            ORDER BY id DESC
-            """
-        )
-
-        produtos = cursor.fetchall()
-
-        return jsonify({
-            "success": True,
-            "data": produtos
-        })
-
-    except Exception as erro:
-
-        print("ERRO PRODUTOS:", erro)
-
-        return jsonify({
-            "success": False,
-            "message": "Erro ao buscar produtos"
-        }), 500
-
-    finally:
-
-        if cursor:
-            cursor.close()
-
-        if banco and banco.is_connected():
-            banco.close()
-
-
-
-@app.get("/api/produtos/<int:produto_id>")
-@login_required
-def buscar_produto(produto_id):
-
-    banco = None
-    cursor = None
-
-    try:
-
-        banco = conectar()
-        cursor = banco.cursor(dictionary=True)
-
-        cursor.execute(
-            """
-            SELECT
-                id,
-                nome,
-                categoria,
-                quantidade,
-                estoque_minimo,
-                preco,
-                foto
-            FROM produtos
-            WHERE id = %s
-            """,
-            (produto_id,)
-        )
-
-        produto = cursor.fetchone()
-
-        if not produto:
             return jsonify({
-                "success": False,
-                "message": "Produto não encontrado"
-            }), 404
+                "success": True,
+                "data": cur.fetchall()
+            })
 
-        return jsonify({
-            "success": True,
-            "data": produto
-        })
+    except Exception as e:
+        print("ERRO PRODUTOS:", e)
+        return resp(
+            "Erro ao buscar produtos",
+            code=500
+        )
 
-    except Exception as erro:
 
-        print("ERRO BUSCAR PRODUTO:", erro)
+@app.get("/api/produtos/<int:id>")
+@login_required
+def buscar_produto(id):
+    try:
+        with db() as (_, cur):
+            cur.execute(
+                f"""
+                SELECT {CAMPOS}
+                FROM produtos
+                WHERE id=%s
+                """,
+                (id,)
+            )
 
-        return jsonify({
-            "success": False,
-            "message": "Erro ao buscar produto"
-        }), 500
+            produto = cur.fetchone()
 
-    finally:
+            if not produto:
+                return resp(
+                    "Produto não encontrado",
+                    code=404
+                )
 
-        if cursor:
-            cursor.close()
+            return jsonify({
+                "success": True,
+                "data": produto
+            })
 
-        if banco and banco.is_connected():
-            banco.close()
-
+    except Exception as e:
+        print("ERRO BUSCAR PRODUTO:", e)
+        return resp(
+            "Erro ao buscar produto",
+            code=500
+        )
 
 
 @app.post("/api/produtos")
 @admin_required
 def criar_produto():
+    p, erro = produto_dados()
 
-    dados = request.get_json(silent=True) or {}
+    if erro:
+        return erro
 
-    nome = str(dados.get("nome", "")).strip()
-    categoria = str(dados.get("categoria", "")).strip()
-
-    quantidade = dados.get("quantidade", 0)
-    estoque_minimo = dados.get("estoque_minimo", 0)
-    preco = dados.get("preco", 0)
-    foto = dados.get("foto")
-
-    if not nome or not categoria:
-        return jsonify({
-            "success": False,
-            "message": "Nome e categoria são obrigatórios"
-        }), 400
-
-    try:
-        quantidade = int(quantidade)
-        estoque_minimo = int(estoque_minimo)
-        preco = float(preco)
-    except (ValueError, TypeError):
-
-        return jsonify({
-            "success": False,
-            "message": "Valores inválidos"
-        }), 400
-
-    if quantidade < 0 or estoque_minimo < 0 or preco < 0:
-        return jsonify({
-            "success": False,
-            "message": "Os valores não podem ser negativos"
-        }), 400
-
-    banco = None
-    cursor = None
-
-    try:
-
-        banco = conectar()
-        cursor = banco.cursor()
-
-        cursor.execute(
-            """
-            INSERT INTO produtos
-            (nome, categoria, quantidade, estoque_minimo, preco, foto)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            """,
-            (
-                nome,
-                categoria,
-                quantidade,
-                estoque_minimo,
-                preco,
-                foto
-            )
+    if p["quantidade"] < 0 or p["estoque_minimo"] < 0 or p["preco"] < 0:
+        return resp(
+            "Os valores não podem ser negativos",
+            code=400
         )
 
-        banco.commit()
+    try:
+        with db() as (con, cur):
+            cur.execute(
+                """
+                INSERT INTO produtos
+                (nome,categoria,quantidade,estoque_minimo,preco,foto)
+                VALUES(%s,%s,%s,%s,%s,%s)
+                """,
+                tuple(p.values())
+            )
 
-        return jsonify({
-            "success": True,
-            "message": "Produto criado com sucesso",
-            "data": {
-                "id": cursor.lastrowid
-            }
-        }), 201
+            con.commit()
 
-    except Exception as erro:
+            return resp(
+                "Produto criado com sucesso",
+                True,
+                201,
+                data={"id": cur.lastrowid}
+            )
 
-        if banco:
-            banco.rollback()
-
-        print("ERRO CRIAR PRODUTO:", erro)
-
-        return jsonify({
-            "success": False,
-            "message": "Erro ao criar produto"
-        }), 500
-
-    finally:
-
-        if cursor:
-            cursor.close()
-
-        if banco and banco.is_connected():
-            banco.close()
+    except Exception as e:
+        print("ERRO CRIAR:", e)
+        return resp(
+            "Erro ao criar produto",
+            code=500
+        )
 
 
-
-@app.put("/api/produtos/<int:produto_id>")
+@app.put("/api/produtos/<int:id>")
 @admin_required
-def editar_produto(produto_id):
+def editar_produto(id):
+    p, erro = produto_dados()
 
-    dados = request.get_json(silent=True) or {}
-
-    nome = str(dados.get("nome", "")).strip()
-    categoria = str(dados.get("categoria", "")).strip()
-
-    quantidade = dados.get("quantidade", 0)
-    estoque_minimo = dados.get("estoque_minimo", 0)
-    preco = dados.get("preco", 0)
-    foto = dados.get("foto")
-
-    if not nome or not categoria:
-        return jsonify({
-            "success": False,
-            "message": "Nome e categoria são obrigatórios"
-        }), 400
+    if erro:
+        return erro
 
     try:
-
-        quantidade = int(quantidade)
-        estoque_minimo = int(estoque_minimo)
-        preco = float(preco)
-
-    except (ValueError, TypeError):
-
-        return jsonify({
-            "success": False,
-            "message": "Valores inválidos"
-        }), 400
-
-    banco = None
-    cursor = None
-
-    try:
-
-        banco = conectar()
-        cursor = banco.cursor()
-
-        cursor.execute(
-            "SELECT id FROM produtos WHERE id = %s",
-            (produto_id,)
-        )
-
-        if not cursor.fetchone():
-            return jsonify({
-                "success": False,
-                "message": "Produto não encontrado"
-            }), 404
-
-        cursor.execute(
-            """
-            UPDATE produtos
-            SET
-                nome = %s,
-                categoria = %s,
-                quantidade = %s,
-                estoque_minimo = %s,
-                preco = %s,
-                foto = %s
-            WHERE id = %s
-            """,
-            (
-                nome,
-                categoria,
-                quantidade,
-                estoque_minimo,
-                preco,
-                foto,
-                produto_id
+        with db() as (con, cur):
+            cur.execute(
+                "SELECT id FROM produtos WHERE id=%s",
+                (id,)
             )
+
+            if not cur.fetchone():
+                return resp(
+                    "Produto não encontrado",
+                    code=404
+                )
+
+            cur.execute(
+                """
+                UPDATE produtos
+                SET nome=%s,
+                    categoria=%s,
+                    quantidade=%s,
+                    estoque_minimo=%s,
+                    preco=%s,
+                    foto=%s
+                WHERE id=%s
+                """,
+                (*p.values(), id)
+            )
+
+            con.commit()
+
+            return resp(
+                "Produto atualizado com sucesso",
+                True
+            )
+
+    except Exception as e:
+        print("ERRO EDITAR:", e)
+        return resp(
+            "Erro ao editar produto",
+            code=500
         )
 
-        banco.commit()
-
-        return jsonify({
-            "success": True,
-            "message": "Produto atualizado com sucesso"
-        })
-
-    except Exception as erro:
-
-        if banco:
-            banco.rollback()
-
-        print("ERRO EDITAR PRODUTO:", erro)
-
-        return jsonify({
-            "success": False,
-            "message": "Erro ao editar produto"
-        }), 500
-
-    finally:
-
-        if cursor:
-            cursor.close()
-
-        if banco and banco.is_connected():
-            banco.close()
-
-
-
-@app.post("/api/produtos/<int:produto_id>/adicionar")
-@login_required
-def adicionar_produto(produto_id):
-
-    dados = request.get_json(silent=True) or {}
-
-    quantidade = dados.get("quantidade")
+def alterar_estoque(id, quantidade, entrada):
+    d = request.get_json(silent=True) or {}
 
     try:
-        quantidade = int(quantidade)
+        quantidade = int(d.get("quantidade"))
     except (ValueError, TypeError):
-
-        return jsonify({
-            "success": False,
-            "message": "Quantidade inválida"
-        }), 400
+        return resp("Quantidade inválida", code=400)
 
     if quantidade <= 0:
-        return jsonify({
-            "success": False,
-            "message": "A quantidade deve ser maior que zero"
-        }), 400
+        return resp(
+            "A quantidade deve ser maior que zero",
+            code=400
+        )
 
-    banco = None
-    cursor = None
+    tipo = "Entrada" if entrada else "Retirada"
 
     try:
-
-        banco = conectar()
-        cursor = banco.cursor(dictionary=True)
-
-        cursor.execute(
-            """
-            SELECT id
-            FROM produtos
-            WHERE id = %s
-            FOR UPDATE
-            """,
-            (produto_id,)
-        )
-
-        produto = cursor.fetchone()
-
-        if not produto:
-            return jsonify({
-                "success": False,
-                "message": "Produto não encontrado"
-            }), 404
-
-        cursor.execute(
-            """
-            UPDATE produtos
-            SET quantidade = quantidade + %s
-            WHERE id = %s
-            """,
-            (quantidade, produto_id)
-        )
-
-        cursor.execute(
-            """
-            INSERT INTO movimentacoes
-            (produto_id, usuario_id, quantidade, tipo)
-            VALUES (%s, %s, %s, 'Entrada')
-            """,
-            (
-                produto_id,
-                request.usuario["id"],
-                quantidade
+        with db() as (con, cur):
+            cur.execute(
+                """
+                SELECT id,quantidade
+                FROM produtos
+                WHERE id=%s
+                FOR UPDATE
+                """,
+                (id,)
             )
+
+            produto = cur.fetchone()
+
+            if not produto:
+                return resp(
+                    "Produto não encontrado",
+                    code=404
+                )
+
+            if not entrada and produto["quantidade"] < quantidade:
+                return resp(
+                    "Estoque insuficiente",
+                    code=400
+                )
+
+            operador = "+" if entrada else "-"
+
+            cur.execute(
+                f"""
+                UPDATE produtos
+                SET quantidade=quantidade{operador}%s
+                WHERE id=%s
+                """,
+                (quantidade, id)
+            )
+
+            cur.execute(
+                """
+                INSERT INTO movimentacoes
+                (produto_id,usuario_id,quantidade,tipo)
+                VALUES(%s,%s,%s,%s)
+                """,
+                (
+                    id,
+                    request.usuario["id"],
+                    quantidade,
+                    tipo
+                )
+            )
+
+            con.commit()
+
+            return resp(
+                "Estoque adicionado com sucesso"
+                if entrada else
+                "Produto retirado com sucesso",
+                True
+            )
+
+    except Exception as e:
+        print("ERRO ESTOQUE:", e)
+        return resp(
+            "Erro ao alterar estoque",
+            code=500
         )
 
-        banco.commit()
 
-        return jsonify({
-            "success": True,
-            "message": "Estoque adicionado com sucesso"
-        })
-
-    except Exception as erro:
-
-        if banco:
-            banco.rollback()
-
-        print("ERRO ADICIONAR:", erro)
-
-        return jsonify({
-            "success": False,
-            "message": "Erro ao adicionar estoque"
-        }), 500
-
-    finally:
-
-        if cursor:
-            cursor.close()
-
-        if banco and banco.is_connected():
-            banco.close()
-
-
-@app.post("/api/produtos/<int:produto_id>/retirar")
+@app.post("/api/produtos/<int:id>/adicionar")
 @login_required
-def retirar_produto(produto_id):
-
-    dados = request.get_json(silent=True) or {}
-
-    quantidade = dados.get("quantidade")
-
-    try:
-        quantidade = int(quantidade)
-    except (ValueError, TypeError):
-
-        return jsonify({
-            "success": False,
-            "message": "Quantidade inválida"
-        }), 400
-
-    if quantidade <= 0:
-        return jsonify({
-            "success": False,
-            "message": "A quantidade deve ser maior que zero"
-        }), 400
-
-    banco = None
-    cursor = None
-
-    try:
-
-        banco = conectar()
-        cursor = banco.cursor(dictionary=True)
-
-        cursor.execute(
-            """
-            SELECT id, quantidade
-            FROM produtos
-            WHERE id = %s
-            FOR UPDATE
-            """,
-            (produto_id,)
-        )
-
-        produto = cursor.fetchone()
-
-        if not produto:
-            return jsonify({
-                "success": False,
-                "message": "Produto não encontrado"
-            }), 404
-
-        if produto["quantidade"] < quantidade:
-            return jsonify({
-                "success": False,
-                "message": "Estoque insuficiente"
-            }), 400
-
-        cursor.execute(
-            """
-            UPDATE produtos
-            SET quantidade = quantidade - %s
-            WHERE id = %s
-            """,
-            (quantidade, produto_id)
-        )
-
-        cursor.execute(
-            """
-            INSERT INTO movimentacoes
-            (produto_id, usuario_id, quantidade, tipo)
-            VALUES (%s, %s, %s, 'Retirada')
-            """,
-            (
-                produto_id,
-                request.usuario["id"],
-                quantidade
-            )
-        )
-
-        banco.commit()
-
-        return jsonify({
-            "success": True,
-            "message": "Produto retirado com sucesso"
-        })
-
-    except Exception as erro:
-
-        if banco:
-            banco.rollback()
-
-        print("ERRO RETIRAR:", erro)
-
-        return jsonify({
-            "success": False,
-            "message": "Erro ao retirar produto"
-        }), 500
-
-    finally:
-
-        if cursor:
-            cursor.close()
-
-        if banco and banco.is_connected():
-            banco.close()
+def adicionar_produto(id):
+    return alterar_estoque(id, None, True)
 
 
-@app.delete("/api/produtos/<int:produto_id>")
+@app.post("/api/produtos/<int:id>/retirar")
+@login_required
+def retirar_produto(id):
+    return alterar_estoque(id, None, False)
+
+@app.delete("/api/produtos/<int:id>")
 @admin_required
-def excluir_produto(produto_id):
-
-    banco = None
-    cursor = None
-
+def excluir_produto(id):
     try:
+        with db() as (con, cur):
+            cur.execute(
+                "SELECT id FROM produtos WHERE id=%s",
+                (id,)
+            )
 
-        banco = conectar()
-        cursor = banco.cursor(dictionary=True)
+            if not cur.fetchone():
+                return resp(
+                    "Produto não encontrado",
+                    code=404
+                )
 
-        cursor.execute(
-            "SELECT id FROM produtos WHERE id = %s",
-            (produto_id,)
+            cur.execute(
+                """
+                SELECT COUNT(*) AS total
+                FROM movimentacoes
+                WHERE produto_id=%s
+                """,
+                (id,)
+            )
+
+            if cur.fetchone()["total"]:
+                return resp(
+                    "Este produto possui movimentações e não pode ser excluído",
+                    code=400
+                )
+
+            cur.execute(
+                "DELETE FROM produtos WHERE id=%s",
+                (id,)
+            )
+
+            con.commit()
+
+            return resp(
+                "Produto excluído com sucesso",
+                True
+            )
+
+    except Exception as e:
+        print("ERRO EXCLUIR:", e)
+        return resp(
+            "Erro ao excluir produto",
+            code=500
         )
-
-        if not cursor.fetchone():
-            return jsonify({
-                "success": False,
-                "message": "Produto não encontrado"
-            }), 404
-
-        # Verifica se existem movimentações
-        cursor.execute(
-            """
-            SELECT COUNT(*) AS total
-            FROM movimentacoes
-            WHERE produto_id = %s
-            """,
-            (produto_id,)
-        )
-
-        movimentacoes = cursor.fetchone()
-
-        if movimentacoes["total"] > 0:
-            return jsonify({
-                "success": False,
-                "message": "Este produto possui movimentações e não pode ser excluído"
-            }), 400
-
-        cursor.execute(
-            "DELETE FROM produtos WHERE id = %s",
-            (produto_id,)
-        )
-
-        banco.commit()
-
-        return jsonify({
-            "success": True,
-            "message": "Produto excluído com sucesso"
-        })
-
-    except Exception as erro:
-
-        if banco:
-            banco.rollback()
-
-        print("ERRO EXCLUIR:", erro)
-
-        return jsonify({
-            "success": False,
-            "message": "Erro ao excluir produto"
-        }), 500
-
-    finally:
-
-        if cursor:
-            cursor.close()
-
-        if banco and banco.is_connected():
-            banco.close()
-
 
 @app.get("/api/movimentacoes")
 @login_required
 def listar_movimentacoes():
-
-    banco = None
-    cursor = None
-
     try:
+        with db() as (_, cur):
+            cur.execute(
+                """
+                SELECT
+                    m.id,
+                    m.produto_id,
+                    p.nome AS produto,
+                    m.usuario_id,
+                    u.email AS usuario,
+                    m.quantidade,
+                    m.tipo,
+                    m.data_hora
+                FROM movimentacoes m
+                JOIN produtos p ON p.id=m.produto_id
+                JOIN usuario u ON u.id=m.usuario_id
+                ORDER BY m.data_hora DESC
+                """
+            )
 
-        banco = conectar()
-        cursor = banco.cursor(dictionary=True)
+            return jsonify({
+                "success": True,
+                "data": cur.fetchall()
+            })
 
-        cursor.execute(
-            """
-            SELECT
-                m.id,
-                m.produto_id,
-                p.nome AS produto,
-                m.usuario_id,
-                u.email AS usuario,
-                m.quantidade,
-                m.tipo,
-                m.data_hora
-            FROM movimentacoes m
-            INNER JOIN produtos p
-                ON p.id = m.produto_id
-            INNER JOIN usuario u
-                ON u.id = m.usuario_id
-            ORDER BY m.data_hora DESC
-            """
+    except Exception as e:
+        print("ERRO MOVIMENTACOES:", e)
+        return resp(
+            "Erro ao buscar movimentações",
+            code=500
         )
-
-        movimentacoes = cursor.fetchall()
-
-        return jsonify({
-            "success": True,
-            "data": movimentacoes
-        })
-
-    except Exception as erro:
-
-        print("ERRO MOVIMENTACOES:", erro)
-
-        return jsonify({
-            "success": False,
-            "message": "Erro ao buscar movimentações"
-        }), 500
-
-    finally:
-
-        if cursor:
-            cursor.close()
-
-        if banco and banco.is_connected():
-            banco.close()
-
 
 @app.get("/api/usuarios")
 @admin_required
 def listar_usuarios():
-
-    banco = None
-    cursor = None
-
     try:
+        with db() as (_, cur):
+            cur.execute(
+                """
+                SELECT id,email,tipo
+                FROM usuario
+                ORDER BY id DESC
+                """
+            )
 
-        banco = conectar()
-        cursor = banco.cursor(dictionary=True)
+            return jsonify({
+                "success": True,
+                "data": cur.fetchall()
+            })
 
-        cursor.execute(
-            """
-            SELECT id, email, tipo
-            FROM usuario
-            ORDER BY id DESC
-            """
+    except Exception as e:
+        print("ERRO USUARIOS:", e)
+        return resp(
+            "Erro ao buscar usuários",
+            code=500
         )
-
-        usuarios = cursor.fetchall()
-
-        return jsonify({
-            "success": True,
-            "data": usuarios
-        })
-
-    except Exception as erro:
-
-        print("ERRO USUARIOS:", erro)
-
-        return jsonify({
-            "success": False,
-            "message": "Erro ao buscar usuários"
-        }), 500
-
-    finally:
-
-        if cursor:
-            cursor.close()
-
-        if banco and banco.is_connected():
-            banco.close()
-
-
+    
 if __name__ == "__main__":
-
     print("======================================")
     print(" ALMOXARIFADO - API FLASK")
     print("======================================")
-    print(f"Banco: {DB_HOST}:{DB_PORT}/{DB_NAME}")
+    print(f"Banco: {DB['host']}:{DB['port']}/{DB['database']}")
     print("Servidor: http://0.0.0.0:5000")
     print("======================================")
 

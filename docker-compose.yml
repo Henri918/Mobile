@@ -1,5 +1,4 @@
 services:
-
   mysql:
     image: mysql:8.4
     environment:
@@ -11,10 +10,10 @@ services:
       - mysql_data:/var/lib/mysql
       - ./database.sql:/docker-entrypoint-initdb.d/database.sql:ro
     healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-proot"]
       interval: 5s
       timeout: 5s
-      retries: 20
+      retries: 10
 
   backend:
     build:
@@ -31,7 +30,6 @@ services:
     depends_on:
       mysql:
         condition: service_healthy
-    restart: unless-stopped
 
 volumes:
   mysql_data:

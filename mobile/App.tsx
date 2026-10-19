@@ -5,7 +5,7 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const API = process.env.EXPO_PUBLIC_API_URL || 'http://localhost:5000/api';
+const API = process.env.EXPO_PUBLIC_API_URL || 'http://10.154.20.47:5000/api';
 
 type User = {id:number; email:string; tipo:'admin'|'usuario'};
 type Product = {

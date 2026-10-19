@@ -2,9 +2,6 @@ CREATE DATABASE IF NOT EXISTS login;
 
 USE login;
 
--- =========================
--- USUÁRIOS
--- =========================
 
 CREATE TABLE IF NOT EXISTS usuario (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -12,10 +9,6 @@ CREATE TABLE IF NOT EXISTS usuario (
     senha VARCHAR(255) NOT NULL,
     tipo ENUM('admin', 'usuario') NOT NULL DEFAULT 'usuario'
 );
-
--- =========================
--- PRODUTOS
--- =========================
 
 CREATE TABLE IF NOT EXISTS produtos (
     id INT AUTO_INCREMENT PRIMARY KEY,
@@ -26,10 +19,6 @@ CREATE TABLE IF NOT EXISTS produtos (
     preco DECIMAL(10,2) NOT NULL DEFAULT 0.00,
     foto LONGTEXT
 );
-
--- =========================
--- MOVIMENTAÇÕES
--- =========================
 
 CREATE TABLE IF NOT EXISTS movimentacoes (
     id INT AUTO_INCREMENT PRIMARY KEY,
