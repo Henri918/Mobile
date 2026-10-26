@@ -5,7 +5,7 @@ import {
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const API = process.env.EXPO_PUBLIC_API_URL || 'http://10.154.20.47:5000/api';
+const API = process.env.EXPO_PUBLIC_API_URL || 'http://10.154.20.102:5000/api';
 
 type User = {id:number; email:string; tipo:'admin'|'usuario'};
 type Product = {
@@ -97,6 +97,7 @@ function Main({
   const [products,setProducts] = useState<Product[]>([]);
   const [movs,setMovs] = useState<Movement[]>([]);
   const [users,setUsers] = useState<User[]>([]);
+  const [cadastroAdmin,setCadastroAdmin] = useState(false);
 
   async function carregar(){
     try{
@@ -127,7 +128,30 @@ function Main({
           />
         }
         {page==='mov' && <Movimentos movs={movs}/>}
-        {page==='usuarios' && <Usuarios users={users}/>}
+        
+{page==='usuarios' && user.tipo==='admin' && (
+  cadastroAdmin ? (
+    <CadastroAdmin
+      token={token}
+      voltar={()=>{
+        setCadastroAdmin(false);
+        carregar();
+      }}
+    />
+  ) : (
+    <View style={{flex:1}}>
+      <View style={{padding:15}}>
+        <Button
+          title="+ Cadastrar usuário"
+          onPress={()=>setCadastroAdmin(true)}
+        />
+      </View>
+
+      <Usuarios users={users}/>
+    </View>
+  )
+)}
+
       </View>
 
       <View style={s.menu}>
@@ -371,6 +395,109 @@ function Usuarios({users}:{users:User[]}){
     </View>
   );
 }
+
+function CadastroAdmin({
+  token,voltar
+}:{
+  token:string;
+  voltar:()=>void;
+}){
+  const [email,setEmail] = useState('');
+  const [senha,setSenha] = useState('');
+  const [tipo,setTipo] = useState<'admin'|'usuario'>('usuario');
+  const [salvando,setSalvando] = useState(false);
+
+  async function salvar(){
+    if(!email.trim() || !senha){
+      Alert.alert('Atenção','Preencha email e senha');
+      return;
+    }
+
+    if(senha.length < 6){
+      Alert.alert(
+        'Atenção',
+        'A senha precisa ter pelo menos 6 caracteres'
+      );
+      return;
+    }
+
+    if(salvando) return;
+    setSalvando(true);
+
+    try{
+      await api('/usuarios',{
+        method:'POST',
+        body:JSON.stringify({
+          email:email.trim(),
+          senha,
+          tipo
+        })
+      },token);
+
+      Alert.alert('Sucesso','Usuário cadastrado com sucesso!');
+      voltar();
+
+    }catch(e:any){
+      Alert.alert('Erro',e.message);
+    }finally{
+      setSalvando(false);
+    }
+  }
+
+  return (
+    <View style={s.caixa}>
+      <Text style={s.titulo}>Cadastrar usuário</Text>
+
+      <Text>E-mail</Text>
+      <TextInput
+        style={s.input}
+        placeholder="Digite o email"
+        value={email}
+        onChangeText={setEmail}
+        autoCapitalize="none"
+        keyboardType="email-address"
+      />
+
+      <Text>Senha</Text>
+      <TextInput
+        style={s.input}
+        placeholder="Digite a senha"
+        value={senha}
+        onChangeText={setSenha}
+        secureTextEntry
+      />
+
+      <Text style={{marginBottom:10}}>
+        Tipo de usuário
+      </Text>
+
+      <View style={s.linha}>
+        <Button
+          title={tipo==='usuario' ? '✓ Usuário' : 'Usuário'}
+          onPress={()=>setTipo('usuario')}
+        />
+
+        <Button
+          title={tipo==='admin' ? '✓ Administrador' : 'Administrador'}
+          onPress={()=>setTipo('admin')}
+        />
+      </View>
+
+      <View style={{marginTop:20}}>
+        <Button
+          title={salvando ? 'Salvando...' : 'Cadastrar'}
+          onPress={salvar}
+        />
+
+        <Button
+          title="Voltar"
+          onPress={voltar}
+        />
+      </View>
+    </View>
+  );
+}
+
 
 function Button({
   title,onPress

@@ -15,6 +15,7 @@ DB = {
     "database": os.getenv("DB_NAME", "login")
 }
 
+
 tokens = {}
 
 @contextmanager
@@ -615,6 +616,77 @@ def listar_usuarios():
             "Erro ao buscar usuários",
             code=500
         )
+
+@app.post("/api/usuarios")
+@admin_required
+def cadastrar_usuario_admin():
+    d = request.get_json(silent=True) or {}
+
+    email = str(d.get("email", "")).strip().lower()
+    senha = str(d.get("senha", ""))
+    tipo = str(d.get("tipo", "usuario")).strip().lower()
+
+    if not email or not senha:
+        return resp("Preencha email e senha", code=400)
+
+    if len(senha) < 6:
+        return resp(
+            "A senha deve ter pelo menos 6 caracteres",
+            code=400
+        )
+
+    if tipo not in ["admin", "usuario"]:
+        return resp("Tipo de usuário inválido", code=400)
+
+    try:
+        with db() as (con, cur):
+            cur.execute(
+                "SELECT id FROM usuario WHERE email=%s",
+                (email,)
+            )
+
+            if cur.fetchone():
+                return resp(
+                    "Este email já está cadastrado",
+                    code=409
+                )
+
+            senha_hash = bcrypt.hashpw(
+                senha.encode(),
+                bcrypt.gensalt()
+            ).decode()
+
+            cur.execute(
+                """
+                INSERT INTO usuario (email, senha, tipo)
+                VALUES (%s, %s, %s)
+                """,
+                (email, senha_hash, tipo)
+            )
+
+            novo_id = cur.lastrowid
+            con.commit()
+
+            return resp(
+                "Usuário cadastrado com sucesso",
+                True,
+                201,
+                data={
+                    "id": novo_id,
+                    "email": email,
+                    "tipo": tipo
+                }
+            )
+
+    except mysql.connector.IntegrityError:
+        return resp(
+            "Este email já está cadastrado",
+            code=409
+        )
+
+    except Exception as e:
+        print("ERRO CADASTRO ADMIN:", e)
+        return resp("Erro ao cadastrar usuário", code=500)
     
 if __name__ == "__main__":
     print("======================================")
