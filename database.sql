@@ -10,6 +10,9 @@ CREATE TABLE IF NOT EXISTS usuario (
     tipo ENUM('admin', 'usuario') NOT NULL DEFAULT 'usuario'
 );
 
+INSERT INTO usuario (email, senha, tipo)
+VALUES ('admin@gmail.com', '$2a$12$GDFilpX8yilVe9GzyMSUNO3DdwaM28cuns3no/JsqxrHZg8uvD7IS', 'admin');
+
 CREATE TABLE IF NOT EXISTS produtos (
     id INT AUTO_INCREMENT PRIMARY KEY,
     nome VARCHAR(150) NOT NULL,
