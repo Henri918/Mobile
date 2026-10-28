@@ -1,11 +1,20 @@
-import React, {useEffect, useState} from 'react';
+import React, { useEffect, useState } from 'react';
+
 import {
-  Alert, FlatList, Pressable, SafeAreaView, StyleSheet,
-  Text, TextInput, View
+  Alert,
+  FlatList,
+  Pressable,
+  StyleSheet,
+  Text,
+  TextInput,
+  View
 } from 'react-native';
+
+import { SafeAreaView } from 'react-native-safe-area-context';
+
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
-const API = process.env.EXPO_PUBLIC_API_URL || 'http://10.154.20.102:5000/api';
+const API = process.env.EXPO_PUBLIC_API_URL || 'http://10.154.20.153:5000/api';
 
 type User = {id:number; email:string; tipo:'admin'|'usuario'};
 type Product = {
